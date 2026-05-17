@@ -10,6 +10,7 @@ import pyvisa
 import pyperclip
 from io import BytesIO
 from PIL import Image
+import threading
 
 # Cấu hình phong cách hiển thị đồ thị giống MATLAB/Phòng thí nghiệm
 matplotlib.use('TkAgg')
@@ -112,10 +113,10 @@ class HP8903B_App(ctk.CTk):
         self.combo_points.pack(fill="x", padx=10, pady=2)
 
         # Action Buttons
-        self.btn_start = ctk.CTkButton(left_frame, text="BẮT ĐẦU ĐO CHẠY QUÉT FREQUENCY", fg_color="#2980b9", hover_color="#3498db", state="disabled", command=self.start_sweep)
+        self.btn_start = ctk.CTkButton(left_frame, text="BẮT ĐẦU ĐO CHẠY QUÉT FREQUENCY", fg_color="#2980b9", hover_color="#3498db", state="disabled", command=self.start_measurement)
         self.btn_start.pack(fill="x", padx=10, pady=(20, 5))
 
-        self.btn_clear = ctk.CTkButton(left_frame, text="DỪNG KHẨN CẤP / RESET MÁY (CLEAR)", fg_color="#c0392b", hover_color="#e74c3c", state="disabled", command=self.reset_instrument)
+        self.btn_clear = ctk.CTkButton(left_frame, text="DỪNG ĐO / STOP", fg_color="#c0392b", hover_color="#e74c3c", state="disabled", command=self.stop_measurement)
         self.btn_clear.pack(fill="x", padx=10, pady=5)
 
         # ------------------ RIGHT FRAME CONTENT ------------------
@@ -218,7 +219,34 @@ class HP8903B_App(ctk.CTk):
                 return f"{val_float:.2f}"
         except:
             return str(value)
+    def start_measurement(self):
+        """Bắt đầu đo bằng Thread riêng để GUI không bị treo"""
+        if self.is_sweeping:
+            return
 
+        self.is_sweeping = True
+
+        # khóa nút start khi đang đo
+        self.btn_start.configure(state="disabled")
+
+        # tạo luồng chạy đo
+        sweep_thread = threading.Thread(target=self.start_sweep)
+        sweep_thread.daemon = True
+        sweep_thread.start()
+
+    def stop_measurement(self):
+        """Dừng phép đo"""
+        self.is_sweeping = False
+
+        self.btn_start.configure(state="normal")
+
+        try:
+            if self.instrument:
+                self.instrument.write("CL")
+        except:
+            pass
+
+        messagebox.showinfo("STOP", "Đã dừng quá trình đo.")
     def start_sweep(self):
         if not self.instrument:
             return

@@ -11,6 +11,7 @@ from matplotlib.backends.backend_tkagg import (
 import pyperclip
 from io import BytesIO
 from PIL import Image
+import threading
 from driver import HP8903B_Driver
 from sweep import SweepEngine
 # Cấu hình phong cách hiển thị đồ thị giống MATLAB/Phòng thí nghiệm
@@ -206,7 +207,7 @@ class HP8903B_App(ctk.CTk):
             text="BẮT ĐẦU ĐO CHẠY QUÉT FREQUENCY",
             fg_color="#2980b9",
             hover_color="#3498db",
-            command=self.start_sweep
+            command=self.start_measurement
         )
         self.btn_start.pack(
             fill="x",
@@ -215,10 +216,11 @@ class HP8903B_App(ctk.CTk):
         )
         self.btn_clear = ctk.CTkButton(
             left_frame,
-            text="DỪNG KHẨN CẤP / RESET MÁY (CLEAR)",
+            text="DỪNG ĐO /STOP",
             fg_color="#c0392b",
             hover_color="#e74c3c",
-            command=self.reset_instrument
+            state= disablbed,
+            command=self.stop_measurement
         )
         self.btn_clear.pack(
             fill="x",
@@ -332,6 +334,34 @@ class HP8903B_App(ctk.CTk):
                 "Connection Error",
                 str(e)
             )
+        def start_measurement(self):
+        """Bắt đầu đo bằng Thread riêng để GUI không bị treo"""
+        if self.is_sweeping:
+            return
+
+        self.is_sweeping = True
+
+        # khóa nút start khi đang đo
+        self.btn_start.configure(state="disabled")
+
+        # tạo luồng chạy đo
+        sweep_thread = threading.Thread(target=self.start_sweep)
+        sweep_thread.daemon = True
+        sweep_thread.start()
+
+    def stop_measurement(self):
+        """Dừng phép đo"""
+        self.is_sweeping = False
+
+        self.btn_start.configure(state="normal")
+
+        try:
+            if self.instrument:
+                self.instrument.write("CL")
+        except:
+            pass
+
+        messagebox.showinfo("STOP", "Đã dừng quá trình đo.")
     def start_sweep(self):
         try:
             f_start = float(self.entry_f_start.get())
