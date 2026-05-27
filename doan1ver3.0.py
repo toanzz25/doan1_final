@@ -113,10 +113,10 @@ class HP8903B_App(ctk.CTk):
         self.combo_points.pack(fill="x", padx=10, pady=2)
 
         # Action Buttons
-        self.btn_start = ctk.CTkButton(left_frame, text="BẮT ĐẦU ĐO CHẠY QUÉT FREQUENCY", fg_color="#2980b9", hover_color="#3498db", state="disabled", command=self.start_measurement)
+        self.btn_start = ctk.CTkButton(left_frame, text="START", fg_color="#2980b9", hover_color="#3498db", state="disabled", command=self.start_measurement)
         self.btn_start.pack(fill="x", padx=10, pady=(20, 5))
 
-        self.btn_clear = ctk.CTkButton(left_frame, text="DỪNG ĐO / STOP", fg_color="#c0392b", hover_color="#e74c3c", state="disabled", command=self.stop_measurement)
+        self.btn_clear = ctk.CTkButton(left_frame, text=" STOP", fg_color="#c0392b", hover_color="#e74c3c", state="disabled", command=self.stop_measurement)
         self.btn_clear.pack(fill="x", padx=10, pady=5)
 
         # ------------------ RIGHT FRAME CONTENT ------------------
@@ -351,7 +351,12 @@ class HP8903B_App(ctk.CTk):
             output = BytesIO()
             self.fig.savefig(output, format='png', dpi=200, bbox_inches='tight')
             im = Image.open(output)
-            
+            if not WIN32_AVAILABLE:
+                 messagebox.showwarning(
+                "Thiếu thư viện",
+                "Chưa cài pywin32"
+            )
+            return
             # Lưu ảnh tạm dạng bitmap tương thích với hệ thống Clipboard của OS Windows
             output.seek(0)
             output.truncate(0)
@@ -386,4 +391,4 @@ class HP8903B_App(ctk.CTk):
 if __name__ == "__main__":
     # Khởi chạy hệ thống phần mềm điều khiển thiết bị
     app = HP8903B_App()
-    app.mainloop()
+    app.mainloop()  
