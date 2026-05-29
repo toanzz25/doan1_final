@@ -1,102 +1,64 @@
-# ========================= sweep.py =========================
-
 import numpy as np
+import time
+import matplotlib.ticker
 
+def execute_sweep(app, f_start, f_stop, amp_code, mode_code, num_points, mode, spcl_cmd_string):
+    if not app.driver.instrument:
+        app.is_sweeping = False
+        app.btn_start.configure(state="normal")
+        return
+        
+    # Gửi cấu hình Special Functions (nếu có chọn) trước khi quét
+    if spcl_cmd_string:
+        try:
+            app.driver.write(spcl_cmd_string)
+            time.sleep(0.5) # Chờ máy đo phản hồi lệnh cài đặt
+        except Exception as e:
+            print(f"Lỗi gửi Special Functions: {e}")
 
-class SweepEngine:
+    frequencies = np.logspace(np.log10(f_start), np.log10(f_stop), num=num_points)
 
-    def __init__(self, driver):
+    for f in frequencies:
+        if not app.is_sweeping: break
+            
+        f_rounded = int(round(f))
+        app.lbl_live_freq.configure(text=f"Current Counter Freq: {f_rounded} Hz")
+        app.update_idletasks()
 
-        self.driver = driver
+        try:
+            if f_rounded >= 1000:
+                val_khz = round(f_rounded / 1000.0, 3)
+                freq_cmd = f"FR{val_khz:g}KZ"
+            else:
+                freq_cmd = f"FR{f_rounded}HZ"
 
-        # Dữ liệu đo quét
-        self.freq_data = []
+            combined_command = f"{freq_cmd}{amp_code}{mode_code}T3"
+            app.driver.write(combined_command)
+            measured_val = app.driver.query_measurement()
 
-        self.meas_data = []
+            if measured_val is None: continue
 
-        self.is_sweeping = False
+            app.freq_data.append(f_rounded)
+            app.meas_data.append(measured_val)
 
-    def start_sweep(
-        self,
-        f_start,
-        f_stop,
-        num_points,
-        amp_code,
-        mode,
-        callback
-    ):
+            formatted_str = app.format_device_value(measured_val, mode)
+            unit_str = "%" if mode == "THD" else "dB" if mode == "SINAD" else "V"
 
-        if not self.driver.instrument:
-            return
+            app.lbl_live_val.configure(text=f"Current Measurement: {formatted_str} {unit_str}")
+            app.line.set_data(app.freq_data, app.meas_data)
+            
+            app.ax.relim()
+            app.ax.autoscale_view()
+            app.ax.set_xscale('log')
+            app.ax.xaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%g'))
+            app.ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%g'))
+            
+            app.canvas.draw()
+            app.update_idletasks()
 
-        # Thiết lập mã lệnh chế độ đo chuẩn của HP-IB
-        if mode == "THD":
+        except Exception as e:
+            print(f"Error during scan loop: {e}")
+            break
 
-            mode_code = "M3"  # M3: Đo méo dạng Distortion
-
-        elif mode == "SINAD":
-
-            mode_code = "M2"  # M2: Đo SINAD
-
-        else:
-
-            mode_code = "M1"  # M1: Đo AC Level
-
-        # Khóa trạng thái giao diện tránh xung đột khi đang quét dữ liệu
-        self.is_sweeping = True
-
-        self.freq_data = []
-
-        self.meas_data = []
-
-        # Tính toán mảng tần số quét Logarithmic đồng đều giống MATLAB
-        frequencies = np.logspace(
-            np.log10(f_start),
-            np.log10(f_stop),
-            num=num_points
-        )
-
-        # Chạy vòng lặp quét tự động qua bus dữ liệu
-        for f in frequencies:
-
-            if not self.is_sweeping:
-                break
-
-            f_rounded = round(f, 1)
-
-            try:
-
-                # Gửi thiết lập tần số và biên độ an toàn đến khối dao động nội
-                cmd_string = (
-                    f"FR{f_rounded}HZ"
-                    f"AP{amp_code}"
-                    f"{mode_code}T3"
-                )
-
-                self.driver.instrument.write(cmd_string)
-
-                # Trích xuất dữ liệu đo trực tiếp từ máy đo
-                raw_data = self.driver.instrument.read().strip()
-
-                # Chuyển đổi dữ liệu khoa học dạng lũy thừa của HP thành số thực thông thường
-                measured_val = float(raw_data)
-
-                # Lưu trữ kết quả đo
-                self.freq_data.append(f_rounded)
-
-                self.meas_data.append(measured_val)
-
-                callback(
-                    f_rounded,
-                    measured_val,
-                    self.freq_data,
-                    self.meas_data
-                )
-
-            except Exception as e:
-
-                print(f"Error during scan loop: {e}")
-
-                break
-
-        self.is_sweeping = False
+    app.is_sweeping = False
+    app.btn_start.configure(state="normal")

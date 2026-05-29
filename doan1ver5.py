@@ -1,17 +1,19 @@
+import sys
 import tkinter as tk
 from tkinter import messagebox, filedialog
 import customtkinter as ctk
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+import matplotlib.ticker
 import numpy as np
+import pyvisa
 import threading
+import time
 import csv
+import re
 
-# Import module từ các file đã tách
-from driver import HP8903B_Driver
-from sweep import execute_sweep
-
+# Cấu hình giao diện matplotlib
 matplotlib.use('TkAgg')
 plt.style.use(
     'seaborn-v0_8-whitegrid'
@@ -27,20 +29,26 @@ class HP8903B_App(ctk.CTk):
         ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
         
-        # Khởi tạo module Driver riêng biệt thay vì gọi trực tiếp VISA
-        self.driver = HP8903B_Driver()
+        # VISA
+        self.rm = pyvisa.ResourceManager()
+        self.instrument = None
         
+        # dữ liệu sweep
         self.freq_data = []
         self.meas_data = []
         self.is_sweeping = False
+        
+        # Trạng thái con trỏ đồ thị (1: Snap, 2: Crosshair)
         self.cursor_mode = 1 
         
         self.create_widgets()
         
+        # Ràng buộc phím tắt toàn cục để đổi chế độ con trỏ
         self.bind('<KeyPress-1>', self.set_cursor_mode_snap)
         self.bind('<KeyPress-2>', self.set_cursor_mode_crosshair)
 
     def create_widgets(self):
+        # ================= TITLE =================
         title_label = ctk.CTkLabel(
             self,
             text="HP 8903B AUDIO ANALYZER CONTROL SYSTEM",
@@ -48,30 +56,35 @@ class HP8903B_App(ctk.CTk):
         )
         title_label.pack(pady=10)
         
+        # ================= MAIN =================
         main_frame = ctk.CTkFrame(self)
         main_frame.pack(fill="both", expand=True, padx=15, pady=15)
         
+        # SỬ DỤNG CTkScrollableFrame ĐỂ CÓ THỂ CUỘN NẾU GIAO DIỆN QUÁ DÀI
         left_frame = ctk.CTkScrollableFrame(main_frame, width=380)
         left_frame.pack(side="left", fill="both", padx=10, pady=10)
         
         right_frame = ctk.CTkFrame(main_frame)
         right_frame.pack(side="right", fill="both", expand=True, padx=10, pady=10)
         
-        conn_label = ctk.CTkLabel(left_frame, text="KẾT NỐI HỆ THỐNG (GPIB)", font=ctk.CTkFont(size=14, weight="bold"))
+        # ================= CONNECTION =================
+        conn_label = ctk.CTkLabel(
+            left_frame, text="KẾT NỐI HỆ THỐNG (GPIB)", font=ctk.CTkFont(size=14, weight="bold")
+        )
         conn_label.pack(pady=(10, 5), padx=10, anchor="w")
-        
         self.gpib_entry = ctk.CTkEntry(left_frame, placeholder_text="GPIB0::28::INSTR")
         self.gpib_entry.insert(0, "GPIB0::28::INSTR")
         self.gpib_entry.pack(fill="x", padx=10, pady=5)
-        
         self.btn_connect = ctk.CTkButton(
             left_frame, text="CONNECT", fg_color="#27ae60", hover_color="#2ecc71", command=self.connect_instrument
         )
         self.btn_connect.pack(fill="x", padx=10, pady=5)
         
-        mode_label = ctk.CTkLabel(left_frame, text="CHẾ ĐỘ ĐO XOAY CHIỀU", font=ctk.CTkFont(size=14, weight="bold"))
+        # ================= MODE =================
+        mode_label = ctk.CTkLabel(
+            left_frame, text="CHẾ ĐỘ ĐO XOAY CHIỀU", font=ctk.CTkFont(size=14, weight="bold")
+        )
         mode_label.pack(pady=(15, 5), padx=10, anchor="w")
-        
         self.meas_mode = tk.StringVar(value="THD")
         r_thd = ctk.CTkRadioButton(left_frame, text="Đo méo dạng (THD+N)", variable=self.meas_mode, value="THD", command=self.update_ui_limits)
         r_sinad = ctk.CTkRadioButton(left_frame, text="Đo tỷ số SINAD", variable=self.meas_mode, value="SINAD", command=self.update_ui_limits)
@@ -80,7 +93,10 @@ class HP8903B_App(ctk.CTk):
         r_sinad.pack(anchor="w", padx=20, pady=3)
         r_ac.pack(anchor="w", padx=20, pady=3)
         
-        param_label = ctk.CTkLabel(left_frame, text="THIẾT LẬP THAM SỐ QUÉT TỰ ĐỘNG", font=ctk.CTkFont(size=14, weight="bold"))
+        # ================= PARAMETERS =================
+        param_label = ctk.CTkLabel(
+            left_frame, text="THIẾT LẬP THAM SỐ QUÉT TỰ ĐỘNG", font=ctk.CTkFont(size=14, weight="bold")
+        )
         param_label.pack(pady=(15, 5), padx=10, anchor="w")
         
         ctk.CTkLabel(left_frame, text="Tần số bắt đầu (20Hz - 100kHz):").pack(anchor="w", padx=15)
@@ -101,37 +117,55 @@ class HP8903B_App(ctk.CTk):
         self.entry_points = ctk.CTkEntry(left_frame, placeholder_text="VD: 50, 100, 200")
         self.entry_points.pack(fill="x", padx=10, pady=2)
 
-        adv_label = ctk.CTkLabel(left_frame, text="CẤU HÌNH MÁY ĐO NÂNG CAO", font=ctk.CTkFont(size=14, weight="bold"))
+        # ================= CẤU HÌNH NÂNG CAO (SPECIAL FUNCTIONS) =================
+        adv_label = ctk.CTkLabel(
+            left_frame, text="CẤU HÌNH MÁY ĐO NÂNG CAO", font=ctk.CTkFont(size=14, weight="bold")
+        )
         adv_label.pack(pady=(15, 5), padx=10, anchor="w")
         
+        # 1. Trở kháng ngõ ra (Source Output Impedance)
         ctk.CTkLabel(left_frame, text="Trở kháng ngõ ra (Output Impedance):").pack(anchor="w", padx=15)
         self.combo_out_imp = ctk.CTkComboBox(left_frame, values=[
-            "Bỏ qua (Giữ nguyên hiện tại)", "600 Ω (47.0 SP)", "50 Ω (47.1 SP)"
+            "Bỏ qua (Giữ nguyên hiện tại)", 
+            "600 Ω (47.0 SP)", 
+            "50 Ω (47.1 SP)"
         ], state="readonly")
         self.combo_out_imp.set("Bỏ qua (Giữ nguyên hiện tại)")
         self.combo_out_imp.pack(fill="x", padx=10, pady=2)
 
+        # 2. Khuếch đại (Post-Notch Gain)
         ctk.CTkLabel(left_frame, text="Khuếch đại (Post-Notch Gain):").pack(anchor="w", padx=15)
         self.combo_gain = ctk.CTkComboBox(left_frame, values=[
-            "Bỏ qua (Giữ nguyên hiện tại)", "Tự động (3.0 SP)", "0 dB (3.1 SP)", 
-            "20 dB (3.2 SP)", "40 dB (3.3 SP)", "60 dB (3.4 SP)"
+            "Bỏ qua (Giữ nguyên hiện tại)", 
+            "Tự động (3.0 SP)", 
+            "0 dB (3.1 SP)", 
+            "20 dB (3.2 SP)", 
+            "40 dB (3.3 SP)", 
+            "60 dB (3.4 SP)"
         ], state="readonly")
         self.combo_gain.set("Bỏ qua (Giữ nguyên hiện tại)")
         self.combo_gain.pack(fill="x", padx=10, pady=2)
 
+        # 3. Chế độ dò (Detector Response)
         ctk.CTkLabel(left_frame, text="Chế độ phân tích dò (Detector):").pack(anchor="w", padx=15)
         self.combo_detector = ctk.CTkComboBox(left_frame, values=[
-            "Bỏ qua (Giữ nguyên hiện tại)", "Fast RMS (5.0 SP)", "Slow RMS (5.1 SP)", 
-            "Fast AVG (5.2 SP)", "Slow AVG (5.3 SP)", "Quasi-Peak (5.7 SP)"
+            "Bỏ qua (Giữ nguyên hiện tại)", 
+            "Fast RMS (5.0 SP)", 
+            "Slow RMS (5.1 SP)", 
+            "Fast AVG (5.2 SP)", 
+            "Slow AVG (5.3 SP)",
+            "Quasi-Peak (5.7 SP)"
         ], state="readonly")
         self.combo_detector.set("Bỏ qua (Giữ nguyên hiện tại)")
         self.combo_detector.pack(fill="x", padx=10, pady=2)
 
+        # ================= BUTTONS =================
         self.btn_start = ctk.CTkButton(left_frame, text="START", fg_color="#2980b9", hover_color="#3498db", state="disabled", command=self.start_measurement)
         self.btn_start.pack(fill="x", padx=10, pady=(20, 5))
         self.btn_clear = ctk.CTkButton(left_frame, text="STOP", fg_color="#c0392b", hover_color="#e74c3c", state="disabled", command=self.stop_measurement)
         self.btn_clear.pack(fill="x", padx=10, pady=5)
         
+        # ================= MONITOR =================
         monitor_frame = ctk.CTkFrame(right_frame, height=80)
         monitor_frame.pack(fill="x", padx=10, pady=5)
 
@@ -140,6 +174,7 @@ class HP8903B_App(ctk.CTk):
         self.lbl_live_val = ctk.CTkLabel(monitor_frame, text="Current Measurement: -- %", font=ctk.CTkFont(size=16, weight="bold"), text_color="#f1c40f")
         self.lbl_live_val.pack(side="right", padx=30, pady=10)
         
+        # ================= PLOT =================
         self.plot_frame = ctk.CTkFrame(right_frame)
         self.plot_frame.pack(fill="both", expand=True, padx=10, pady=5)
         
@@ -283,35 +318,76 @@ class HP8903B_App(ctk.CTk):
 
     def update_ui_limits(self):
         mode = self.meas_mode.get()
+        
+        # Cấu hình font size cho tiêu đề (Bạn có thể chỉnh con số 30 to hơn nếu muốn)
         title_font_size = 30 
         
         if mode == "THD":
             self.lbl_live_val.configure(text="Current Measurement: -- %")
+            # Thay đổi tên và tăng kích cỡ chữ
             self.ax.set_title("Đồ thị đo THD+N", fontweight='bold', fontsize=title_font_size, pad=35)
             self.ax.set_ylabel("%", fontsize=24, fontweight='bold', rotation=0)
             
         elif mode == "SINAD":
             self.lbl_live_val.configure(text="Current Measurement: -- dB")
+            # Thay đổi tên và tăng kích cỡ chữ
             self.ax.set_title("Đồ thị đo SINAD", fontweight='bold', fontsize=title_font_size, pad=35)
             self.ax.set_ylabel("dB", fontsize=24, fontweight='bold', rotation=0)
             
         elif mode == "AC":
             self.lbl_live_val.configure(text="Current Measurement: -- V")
+            # Thay đổi tên và tăng kích cỡ chữ
             self.ax.set_title("Đồ thị đo AC LEVEL", fontweight='bold', fontsize=title_font_size, pad=35)
             self.ax.set_ylabel("V", fontsize=24, fontweight='bold', rotation=0)
             
+        # Giữ nguyên vị trí nhãn đơn vị Y sát đỉnh trục tung
         self.ax.yaxis.set_label_coords(0.0, 1.02)
+        
         self.fig.canvas.draw_idle()
 
     def connect_instrument(self):
         address = self.gpib_entry.get().strip()
         try:
-            self.driver.connect(address)
+            self.instrument = self.rm.open_resource(address)
+            self.instrument.timeout = 8000
+            self.instrument.write_termination = "\n"
+            self.instrument.read_termination = "\n"
+            self.instrument.clear()
+            self.instrument.write("AU")
+            time.sleep(0.5)
             messagebox.showinfo("Success", f"Đã kết nối thành công với HP8903B tại {address}")
             self.btn_start.configure(state="normal")
             self.btn_clear.configure(state="normal")
         except Exception as e:
             messagebox.showerror("Connection Error", f"Không thể kết nối:\n{str(e)}")
+
+    def parse_amplitude_string(self, amp_str):
+        amp_str = amp_str.strip().lower()
+        match = re.match(r"^([\d\.]+)\s*(mv|v)?$", amp_str)
+        if not match:
+            raise ValueError(
+                "Định dạng biên độ không hợp lệ!\n\n"
+                "Ví dụ nhập đúng:\n- 1.5 V\n- 500 mV\n- 2 (mặc định là V)"
+            )
+            
+        val_str = match.group(1)
+        unit = match.group(2) if match.group(2) else "v"
+        val = float(val_str)
+        if val.is_integer():
+            val = int(val)
+            
+        if unit == "mv":
+            return f"AP {val} MV"
+        else: 
+            return f"AP {val} VL"
+
+    def query_measurement(self):
+        try:
+            raw_data = self.instrument.read().strip()
+            return float(raw_data)
+        except Exception as e:
+            print("Query Error:", e)
+            return None
 
     def format_device_value(self, value, mode):
         try:
@@ -326,13 +402,16 @@ class HP8903B_App(ctk.CTk):
         except:
             return str(value)
 
+    # ================= HÀM MỚI: LẤY LỆNH SPECIAL FUNCTIONS =================
     def get_special_functions_cmd(self):
         spcl_cmds = ""
         
+        # 1. Output Impedance
         imp_val = self.combo_out_imp.get()
         if "47.0" in imp_val: spcl_cmds += "47.0SP"
         elif "47.1" in imp_val: spcl_cmds += "47.1SP"
         
+        # 2. Post-Notch Gain
         gain_val = self.combo_gain.get()
         if "3.0" in gain_val: spcl_cmds += "3.0SP"
         elif "3.1" in gain_val: spcl_cmds += "3.1SP"
@@ -340,6 +419,7 @@ class HP8903B_App(ctk.CTk):
         elif "3.3" in gain_val: spcl_cmds += "3.3SP"
         elif "3.4" in gain_val: spcl_cmds += "3.4SP"
         
+        # 3. Detector Response
         det_val = self.combo_detector.get()
         if "5.0" in det_val: spcl_cmds += "5.0SP"
         elif "5.1" in det_val: spcl_cmds += "5.1SP"
@@ -352,6 +432,7 @@ class HP8903B_App(ctk.CTk):
     def start_measurement(self):
         if self.is_sweeping: return
 
+        # 1. Kiểm tra dải tần số
         try:
             f_start = float(self.entry_f_start.get())
             f_stop = float(self.entry_f_stop.get())
@@ -363,17 +444,19 @@ class HP8903B_App(ctk.CTk):
             messagebox.showerror("Limit Out", "Tần số ngoài phạm vi an toàn (20Hz - 100kHz)!")
             return
 
+        # 2. Kiểm tra phần ô nhập trống và biên độ
         amp_input = self.entry_amp.get().strip()
         if not amp_input:
             messagebox.showerror("Input Error", "Vui lòng nhập Biên độ nguồn phát!")
             return
             
         try:
-            amp_code = self.driver.parse_amplitude_string(amp_input)
+            amp_code = self.parse_amplitude_string(amp_input)
         except ValueError as e:
             messagebox.showerror("Input Error", str(e))
             return
             
+        # 3. Kiểm tra phần ô nhập trống và số điểm quét
         points_input = self.entry_points.get().strip()
         if not points_input:
             messagebox.showerror("Input Error", "Vui lòng nhập Số điểm quét!")
@@ -381,7 +464,8 @@ class HP8903B_App(ctk.CTk):
             
         try:
             num_points = int(points_input)
-            if num_points <= 0: raise ValueError
+            if num_points <= 0:
+                raise ValueError
         except ValueError:
             messagebox.showerror("Input Error", "Số điểm quét phải là một số nguyên dương (VD: 50, 100)!")
             return
@@ -391,6 +475,7 @@ class HP8903B_App(ctk.CTk):
         elif mode == "SINAD": mode_code = "M2"
         else: mode_code = "M1"
         
+        # 4. Lấy chuỗi lệnh Special Functions
         spcl_cmd_string = self.get_special_functions_cmd()
 
         self.is_sweeping = True
@@ -398,10 +483,9 @@ class HP8903B_App(ctk.CTk):
         self.freq_data = []
         self.meas_data = []
 
-        # Chạy thread gọi tới file sweep.py
         sweep_thread = threading.Thread(
-            target=execute_sweep, 
-            args=(self, f_start, f_stop, amp_code, mode_code, num_points, mode, spcl_cmd_string)
+            target=self.start_sweep, 
+            args=(f_start, f_stop, amp_code, mode_code, num_points, mode, spcl_cmd_string)
         )
         sweep_thread.daemon = True
         sweep_thread.start()
@@ -409,8 +493,71 @@ class HP8903B_App(ctk.CTk):
     def stop_measurement(self):
         self.is_sweeping = False
         self.btn_start.configure(state="normal")
-        self.driver.clear()
+        try:
+            if self.instrument: self.instrument.clear()
+        except: pass
         messagebox.showinfo("STOP", "Đã dừng quá trình đo.")
+
+    def start_sweep(self, f_start, f_stop, amp_code, mode_code, num_points, mode, spcl_cmd_string):
+        if not self.instrument:
+            self.is_sweeping = False
+            self.btn_start.configure(state="normal")
+            return
+            
+        # Gửi cấu hình Special Functions (nếu có chọn) trước khi quét
+        if spcl_cmd_string:
+            try:
+                self.instrument.write(spcl_cmd_string)
+                time.sleep(0.5) # Chờ máy đo phản hồi lệnh cài đặt
+            except Exception as e:
+                print(f"Lỗi gửi Special Functions: {e}")
+
+        frequencies = np.logspace(np.log10(f_start), np.log10(f_stop), num=num_points)
+
+        for f in frequencies:
+            if not self.is_sweeping: break
+                
+            f_rounded = int(round(f))
+            self.lbl_live_freq.configure(text=f"Current Counter Freq: {f_rounded} Hz")
+            self.update_idletasks()
+
+            try:
+                if f_rounded >= 1000:
+                    val_khz = round(f_rounded / 1000.0, 3)
+                    freq_cmd = f"FR{val_khz:g}KZ"
+                else:
+                    freq_cmd = f"FR{f_rounded}HZ"
+
+                combined_command = f"{freq_cmd}{amp_code}{mode_code}T3"
+                self.instrument.write(combined_command)
+                measured_val = self.query_measurement()
+
+                if measured_val is None: continue
+
+                self.freq_data.append(f_rounded)
+                self.meas_data.append(measured_val)
+
+                formatted_str = self.format_device_value(measured_val, mode)
+                unit_str = "%" if mode == "THD" else "dB" if mode == "SINAD" else "V"
+
+                self.lbl_live_val.configure(text=f"Current Measurement: {formatted_str} {unit_str}")
+                self.line.set_data(self.freq_data, self.meas_data)
+                
+                self.ax.relim()
+                self.ax.autoscale_view()
+                self.ax.set_xscale('log')
+                self.ax.xaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%g'))
+                self.ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%g'))
+                
+                self.canvas.draw()
+                self.update_idletasks()
+
+            except Exception as e:
+                print(f"Error during scan loop: {e}")
+                break
+
+        self.is_sweeping = False
+        self.btn_start.configure(state="normal")
 
     def export_plot_image(self):
         file_path = filedialog.asksaveasfilename(
@@ -424,3 +571,7 @@ class HP8903B_App(ctk.CTk):
                 messagebox.showinfo("Export Success", f"Đồ thị được lưu tại:\n{file_path}")
             except Exception as e:
                 messagebox.showerror("Export Error", f"Lỗi lưu ảnh: {e}")
+
+if __name__ == "__main__":
+    app = HP8903B_App()
+    app.mainloop()
