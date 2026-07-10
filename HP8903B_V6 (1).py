@@ -1,4 +1,4 @@
-﻿import tkinter as tk
+import tkinter as tk
 from tkinter import messagebox, filedialog
 import customtkinter as ctk
 import matplotlib
@@ -614,3 +614,371 @@ class HP8903B_App(ctk.CTk):
                         writer.writerow(row)
                 messagebox.showinfo("Thành công", f"Đã lưu CSV ra {file_path}")
             except Exception as e: messagebox.showerror("Lỗi", str(e))
+
+    # ================= ĐO ĐẠC =================
+    def toggle_ui_inputs(self, is_sweeping):
+        """Bật/tắt trạng thái (Enable/Disable) toàn bộ nút bấm và ô nhập liệu để tránh người dùng can thiệp khi máy đang đo."""
+        normal_widgets = [
+            self.entry_f_start, self.entry_f_stop, 
+            self.entry_amp, self.entry_points,
+            self.combo_hp_filter, self.combo_lp_filter,
+            self.combo_out_imp, self.combo_input_range, 
+            self.combo_detector, self.combo_gain
+        ]
+        for widget in normal_widgets:
+            widget.configure(state="disabled" if is_sweeping else "normal")
+
+        readonly_widgets = [self.combo_unit, self.combo_sweeps]
+        for widget in readonly_widgets:
+            widget.configure(state="disabled" if is_sweeping else "readonly")
+
+    def stop_measurement(self):
+        if not self.is_sweeping: return
+        self.is_sweeping = False
+        self.btn_clear.configure(state="disabled") 
+        
+        self.toggle_ui_inputs(is_sweeping=False)
+
+    def start_stepped_measurement(self):
+        if self.is_sweeping: return
+        self.btn_start_step.configure(state="disabled")
+        self.is_sweeping = True
+        
+        self.toggle_ui_inputs(is_sweeping=True)
+        
+        for line in self.lines:
+            try: line.remove()
+            except: pass
+        self.lines.clear()
+        if self.ax.get_legend(): self.ax.get_legend().remove()
+        self.all_freq_data = []
+        self.all_meas_data = []
+
+        threading.Thread(target=self.run_stepped_sweep_logic, daemon=True).start()
+
+    def run_stepped_sweep_logic(self):
+        # Luồng (Thread) chạy ngầm thực hiện quá trình đo Stepped Sweep.
+        # Chạy tách biệt với Main Thread để không làm treo giao diện GUI (Non-blocking).
+        if not self.instrument:
+            self.stop_measurement()
+            return
+
+        num_sweeps = int(self.combo_sweeps.get())
+
+        for sweep_idx in range(num_sweeps):
+            if not self.is_sweeping: break
+            
+            if sweep_idx > 0:
+                time.sleep(1.8) # Timer 1.8s chờ máy reload giữa các lần đo
+                
+            try:
+                f_start = self.parse_universal_input(self.entry_f_start.get(), "freq")
+                f_stop = self.parse_universal_input(self.entry_f_stop.get(), "freq")
+                pts = self.parse_universal_input(self.entry_points.get(), "points")
+            except ValueError as e:
+                self.show_error("Lỗi Dữ Liệu", str(e))
+                break
+
+            mode = self.meas_mode.get()
+            ratio_on = self.check_ratio_var.get()
+            unit = self.combo_unit.get()
+            amp = self.entry_amp.get()
+            
+            mode_mapping = {"AC": "M1", "DC": "S1", "SINAD": "M2", "SIG_NOISE": "S2", "DISTN": "M3", "DISTN_LEVEL": "S3"}
+            self.instrument_write_safe(mode_mapping.get(mode, "M3"))
+            self.instrument_write_safe("R1" if ratio_on else "R0")
+            self.instrument_write_safe("LN" if unit in ["%", "V", "mV"] else "LG")
+            
+            if amp:
+                try:
+                    v, u = self.parse_universal_input(amp, "amp")
+                    self.instrument_write_safe(f"AP {int(v)} MV" if u == "MV" and v.is_integer() else f"AP {v} {u}")
+                except: pass
+            # Vòng lặp quét qua tất cả các ComboBox cấu hình nâng cao trên UI.
+            # Dùng Regex lấy mã lệnh bên trong dấu ngoặc tròn, ví dụ: "LP Off (L0)" -> trích xuất "L0"
+            for sp_key in [self.combo_hp_filter.get(), self.combo_lp_filter.get(), 
+                           self.combo_out_imp.get(), self.combo_input_range.get(), 
+                           self.combo_detector.get(), self.combo_gain.get()]:
+                if sp_key and "Bỏ qua" not in sp_key:
+                    m = re.search(r"\(([A-Z0-9\.]+)\s*(?:SP)?\)", sp_key)
+                    if m: self.instrument_write_safe(f"{m.group(1)}SP" if "SP" in sp_key else m.group(1))
+
+            time.sleep(1) 
+
+            color = self.colors[sweep_idx % len(self.colors)]
+            new_line, = self.ax.plot([], [], 'o-', color=color, linewidth=2, markersize=5, label=f"Lần {sweep_idx + 1}")
+            self.lines.append(new_line)
+            self.ax.legend(loc="upper right", frameon=True, fontsize=18)
+            
+            current_freq, current_meas = [], []
+            self.all_freq_data.append(current_freq)
+            self.all_meas_data.append(current_meas)
+
+            frequencies = np.logspace(np.log10(f_start), np.log10(f_stop), num=pts)
+            # Tạo mảng tần số quét theo thang Logarit để mật độ điểm phân bố đều trên đồ thị.
+            for f in frequencies:
+                if not self.is_sweeping: break
+                f_rounded = int(round(f))
+                self.lbl_live_freq.configure(text=f"Lần đo {sweep_idx+1}" if num_sweeps > 1 else "")
+                
+                try:
+                    with self.hw_lock:
+                        # Gửi lệnh đặt tần số (FR). Nếu >= 1000Hz thì dùng đơn vị KZ, ngược lại dùng HZ
+                        self.instrument_write_safe(f"FR{round(f_rounded/1000.0, 3):g}KZ" if f_rounded >= 1000 else f"FR{f_rounded}HZ")
+                        time.sleep(0.15) # Trễ 150ms để bộ dao động nội của máy đo ổn định tần số mới
+                        self.instrument_write_safe("T3") # Lệnh 'T3': Yêu cầu thiết bị thực hiện đo 1 lần (Single Trigger) và lấy kết quả
+                        val = self.instrument.read().strip() # Đọc giá trị trả về từ bộ đệm GPIB
+                    measured_val = float(val)
+
+                    current_unit = unit
+                    if current_unit == "mV": measured_val *= 1000.0
+                    
+                    current_freq.append(f_rounded)
+                    current_meas.append(measured_val)
+                    
+                    self.lbl_live_val_freq.configure(text=f"{f_rounded:>7,} Hz")
+                    self.lbl_live_val_meas.configure(text=f"{measured_val:>8.3f} {current_unit:<3}")
+                    new_line.set_data(current_freq, current_meas)
+                    
+                    # Gọi trực tiếp hàm Auto-Scale
+                    self.update_ui_limits(reset_label=False)
+                    
+                    self.canvas.draw_idle()
+                except Exception as e:
+                    print(e)
+                    break
+
+        was_stopped_by_user = not self.is_sweeping
+        self.is_sweeping = False
+        self.btn_start_step.configure(state="normal")
+        self.btn_clear.configure(state="normal")
+        
+        self.toggle_ui_inputs(is_sweeping=False)
+        
+        if self.instrument:
+            self.instrument_write_safe("T0") 
+            if was_stopped_by_user: 
+                self.lbl_live_freq.configure(text="")
+                messagebox.showinfo("Thông báo", "Đã dừng đo")
+            else: 
+                self.lbl_live_freq.configure(text="")
+                messagebox.showinfo("Thông báo", "Đã hoàn thành đo")
+
+    # ================= ZOOM THÔNG MINH & TƯƠNG TÁC CHUỘT =================
+    def on_scroll(self, event):
+        if not event.inaxes: return
+        
+        base_scale = 1.2
+        scale_factor = 1.0 / base_scale if event.button == 'up' else base_scale
+        
+        cur_xlim = self.ax.get_xlim()
+        cur_ylim = self.ax.get_ylim()
+        
+        absolute_min_x, absolute_max_x, absolute_min_y, absolute_max_y = self._get_absolute_limits()
+
+        try: f_start_input = self.parse_universal_input(self.entry_f_start.get(), "freq")
+        except: f_start_input = 20.0
+        try: f_stop_input = self.parse_universal_input(self.entry_f_stop.get(), "freq")
+        except: f_stop_input = 20000.0
+
+        min_x_log_span = (np.log10(f_stop_input) - np.log10(f_start_input)) * 0.5
+        if min_x_log_span <= 0: min_x_log_span = 0.1  
+        
+        min_y_span = (absolute_max_y - absolute_min_y) * 0.5
+
+        # --- XỬ LÝ TRỤC X ---
+        xdata = event.xdata
+        if xdata is not None and xdata > 0:
+            log_min, log_max = np.log10(cur_xlim[0]), np.log10(cur_xlim[1])
+            log_data = np.log10(xdata)
+            log_abs_min, log_abs_max = np.log10(absolute_min_x), np.log10(absolute_max_x)
+            
+            log_span = log_max - log_min
+            new_log_span = max(min_x_log_span, min(log_span * scale_factor, log_abs_max - log_abs_min))
+
+            x_frac = (log_data - log_min) / log_span
+            new_log_min = log_data - x_frac * new_log_span
+            new_log_max = log_data + (1.0 - x_frac) * new_log_span
+            
+            if new_log_min < log_abs_min:
+                new_log_min = log_abs_min
+                new_log_max = log_abs_min + new_log_span
+            if new_log_max > log_abs_max:
+                new_log_max = log_abs_max
+                new_log_min = log_abs_max - new_log_span
+                
+            self.ax.set_xlim([10**new_log_min, 10**new_log_max])
+
+        # --- XỬ LÝ TRỤC Y ---
+        ydata = event.ydata
+        if ydata is not None:
+            y_span = cur_ylim[1] - cur_ylim[0]
+            new_y_span = max(min_y_span, min(y_span * scale_factor, absolute_max_y - absolute_min_y))
+
+            y_frac = (ydata - cur_ylim[0]) / y_span
+            new_ymin = ydata - y_frac * new_y_span
+            new_ymax = ydata + (1.0 - y_frac) * new_y_span
+            
+            if new_ymin < absolute_min_y:
+                new_ymin = absolute_min_y
+                new_ymax = absolute_min_y + new_y_span
+            if new_ymax > absolute_max_y:
+                new_ymax = absolute_max_y
+                new_ymin = absolute_max_y - new_y_span
+                
+            self.ax.set_ylim([new_ymin, new_ymax])
+        
+        self.canvas.draw_idle()
+
+    def on_axes_leave(self, event):
+        self._hide_all_cursors()
+        self.canvas.draw_idle()
+
+    def on_button_press(self, event):
+        """
+        Bắt sự kiện click chuột trên biểu đồ Matplotlib:
+        - Chuột phải (button 3): Tắt tính năng Cursor.
+        - Chuột trái (button 1): Đánh dấu vị trí bắt đầu để chuẩn bị thao tác kéo (Pan).
+        """
+        
+        if event.button == 3: 
+            self.cursor_mode = "none"
+            self._hide_all_cursors()
+            self.canvas.draw_idle()
+        elif event.button == 1 and event.inaxes: 
+            self._is_panning = True
+            self._last_pan_x, self._last_pan_y = event.x, event.y
+            
+    def on_button_release(self, event):
+        if event.button == 1: self._is_panning = False
+
+    def on_mouse_move(self, event):
+        if not event.inaxes: return self.on_axes_leave(event)
+        
+        # ================= LOGIC KÉO ĐỒ THỊ (PAN) =================
+        if getattr(self, '_is_panning', False) and event.x is not None:
+            # Xử lý kéo đồ thị (Pan): 
+            # Chuyển đổi tọa độ pixel của chuột (event.x, event.y) sang tọa độ dữ liệu (transData)
+            # Tính toán tỷ lệ dịch chuyển (shift) và chặn lại nếu kéo vượt quá giới hạn an toàn.
+            if event.x == self._last_pan_x and event.y == self._last_pan_y: return
+            
+            cur_xlim = self.ax.get_xlim()
+            cur_ylim = self.ax.get_ylim()
+            
+            inv = self.ax.transData.inverted()
+            x0_data, y0_data = inv.transform((self._last_pan_x, self._last_pan_y))
+            x1_data, y1_data = inv.transform((event.x, event.y))
+            
+            shift_x_ratio = x0_data / x1_data
+            shift_y_diff = y0_data - y1_data
+            
+            new_xlim = [cur_xlim[0] * shift_x_ratio, cur_xlim[1] * shift_x_ratio]
+            new_ylim = [cur_ylim[0] + shift_y_diff, cur_ylim[1] + shift_y_diff]
+            
+            absolute_min_x, absolute_max_x, absolute_min_y, absolute_max_y = self._get_absolute_limits()
+                
+            if new_xlim[0] < absolute_min_x:
+                span_ratio = new_xlim[1] / new_xlim[0]
+                new_xlim[0] = absolute_min_x
+                new_xlim[1] = absolute_min_x * span_ratio
+            if new_xlim[1] > absolute_max_x:
+                span_ratio = new_xlim[1] / new_xlim[0]
+                new_xlim[1] = absolute_max_x
+                new_xlim[0] = absolute_max_x / span_ratio
+                
+            if new_ylim[0] < absolute_min_y:
+                span_y = new_ylim[1] - new_ylim[0]
+                new_ylim[0] = absolute_min_y
+                new_ylim[1] = absolute_min_y + span_y
+            if new_ylim[1] > absolute_max_y:
+                span_y = new_ylim[1] - new_ylim[0]
+                new_ylim[1] = absolute_max_y
+                new_ylim[0] = absolute_max_y - span_y
+                
+            self.ax.set_xlim(new_xlim)
+            self.ax.set_ylim(new_ylim)
+            self.canvas.draw_idle()
+            
+            self._last_pan_x, self._last_pan_y = event.x, event.y
+            return 
+
+        # ================= LOGIC CURSOR (Crosshair/Snap) =================
+        unit_str = self.combo_unit.get()
+        if self.cursor_mode == "crosshair":
+            self.snap_point.set_visible(False)
+            self.crosshair_h.set_ydata([event.ydata, event.ydata])
+            self.crosshair_v.set_xdata([event.xdata, event.xdata])
+            self.crosshair_h.set_visible(True)
+            self.crosshair_v.set_visible(True)
+            self.snap_annot.xy = (event.xdata, event.ydata)
+            freq_str = f"{event.xdata/1000:.2f} kHz" if event.xdata >= 1000 else f"{event.xdata:.1f} Hz"
+            self.snap_annot.set_text(f"{freq_str}\n{event.ydata:.3f} {unit_str}")
+            self.snap_annot.set_visible(True)
+            self.canvas.draw_idle()
+            
+        elif self.cursor_mode == "snap":
+            self.crosshair_h.set_visible(False)
+            self.crosshair_v.set_visible(False)
+            if not self.all_freq_data: return
+            
+            mouse_x, mouse_y = event.x, event.y
+            min_dist, closest_x, closest_y = float('inf'), None, None
+            for i in range(len(self.all_freq_data)):
+                if not self.all_freq_data[i]: continue
+                pts = np.column_stack((self.all_freq_data[i], self.all_meas_data[i]))
+                screen_pts = self.ax.transData.transform(pts)
+                dists = np.sqrt((screen_pts[:, 0] - mouse_x)**2 + (screen_pts[:, 1] - mouse_y)**2)
+                idx = dists.argmin()
+                if dists[idx] < min_dist:
+                    min_dist, closest_x, closest_y = dists[idx], self.all_freq_data[i][idx], self.all_meas_data[i][idx]
+                    
+            if min_dist > 50 or closest_x is None:
+                self.snap_point.set_visible(False)
+                self.snap_annot.set_visible(False)
+                self.canvas.draw_idle()
+                return
+                
+            self.snap_point.set_data([closest_x], [closest_y])
+            self.snap_point.set_visible(True)
+            self.snap_annot.xy = (closest_x, closest_y)
+            freq_str = f"{closest_x/1000:g} kHz" if closest_x >= 1000 else f"{closest_x:g} Hz"
+            self.snap_annot.set_text(f"{freq_str}\n{closest_y:.3f} {unit_str}")
+            self.snap_annot.set_visible(True)
+            self.canvas.draw_idle()
+
+    def set_cursor_mode_snap(self, event=None):
+        self.cursor_mode = "snap"
+        self._hide_all_cursors()
+        self.canvas.draw()
+        
+    def set_cursor_mode_crosshair(self, event=None):
+        self.cursor_mode = "crosshair"
+        self._hide_all_cursors()
+        self.canvas.draw()
+
+# ================= ĐÓNG ỨNG DỤNG AN TOÀN =================
+    def on_closing(self):
+        # 1. Ngắt cờ quét để dừng ngay luồng ngầm (nếu đang chạy)
+        self.is_sweeping = False
+        
+        # 2. Giải phóng kết nối phần cứng HP 8903B
+        if self.instrument:
+            try:
+                self.instrument.control_ren(6) # Trả máy về chế độ Local
+                self.instrument.close()
+            except:
+                pass
+                
+        # 3. Đóng tất cả các luồng đồ thị Matplotlib
+        plt.close('all')
+        
+        # 4. Hủy giao diện
+        self.quit()
+        self.destroy()
+        
+        # 5. Can thiệp hệ điều hành đóng hẳn ứng dụng đang chạy
+        os._exit(0)
+
+if __name__ == "__main__":
+    app = HP8903B_App()
+    app.mainloop()
