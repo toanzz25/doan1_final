@@ -73,15 +73,13 @@ pip install pillow pywin32
 Tai thu muc du an, chay:
 
 ```powershell
-python main.py
+' python HP8903B_V6(1).py '
 ```
-
-File `main.py` se khoi tao lop `HP8903B_App` trong `gui.py` va mo giao dien chinh.
 
 ## Huong dan su dung nhanh
 
 1. Ket noi HP 8903B voi may tinh qua GPIB/VISA.
-2. Mo ung dung bang `python main.py`.
+2. Mo ung dung bang `python HP8903B_V6(1).py`.
 3. Nhap dia chi thiet bi, mac dinh la `GPIB0::28::INSTR`.
 4. Bam `KET NOI`.
 5. Chon che do do: AC, DC, SINAD, SIG/NOISE, DISTN hoac DISTN LEVEL.
